@@ -15,6 +15,7 @@ import java.util.logging.Level;
 import org.preesm.algorithm.clustering.partitioner.ClusterPartitioner;
 import org.preesm.algorithm.clustering.partitioner.ClusterPartitionerGRAIN;
 import org.preesm.algorithm.clustering.partitioner.ClusterPartitionerLOOP2;
+import org.preesm.algorithm.clustering.partitioner.ClusterPartitionerSEQ;
 import org.preesm.algorithm.clustering.partitioner.ClusterPartitionerSRV;
 import org.preesm.algorithm.codegen.idl.Prototype;
 import org.preesm.algorithm.mapping.model.Mapping;
@@ -36,13 +37,18 @@ import org.preesm.model.pisdf.DataOutputInterface;
 import org.preesm.model.pisdf.DataOutputPort;
 import org.preesm.model.pisdf.DataPort;
 import org.preesm.model.pisdf.Delay;
+import org.preesm.model.pisdf.DelayActor;
 import org.preesm.model.pisdf.Dependency;
 import org.preesm.model.pisdf.Direction;
+import org.preesm.model.pisdf.EndActor;
 import org.preesm.model.pisdf.Fifo;
+import org.preesm.model.pisdf.ForkActor;
 import org.preesm.model.pisdf.FunctionArgument;
 import org.preesm.model.pisdf.FunctionPrototype;
 import org.preesm.model.pisdf.ISetter;
+import org.preesm.model.pisdf.InitActor;
 import org.preesm.model.pisdf.InterfaceActor;
+import org.preesm.model.pisdf.JoinActor;
 import org.preesm.model.pisdf.Parameter;
 import org.preesm.model.pisdf.PersistenceLevel;
 import org.preesm.model.pisdf.PiGraph;
@@ -77,63 +83,69 @@ public class Clustering {
 	   * Architecture design.
 	   */
 	  private Design   archi;
-
+	  /**
+	   * Size of the stack.
+	   */
 	  private Long stackSize;
-
+	  /**
+	   * Number of Processing elements.
+	   */
 	  private Long coreNumber;
-
-	  private int clusterNumber;
-
-	  private boolean mode;
-
+	  /**
+	   * Number of hierarchical level.
+	   */
+	  private int levelNumber;
+	  /**
+	   * SCAPE mode : 1 (...); 2 (...); 3 (...).
+	   */
+	  private int mode;
+	  /**
+	   * Fix the number of actor maximum of the SrDAG of the output graph.
+	   */
 	  private int srdagMax;
-
+	  /**
+	   * (not available yet).
+	   */
 	  private boolean parallelCluster;
-
-	  private boolean optimizedCluster;
-
-	  private boolean auto;
-
+	  /**
+	   * assign elements of the same cluster to the same component.
+	   */
 	  private Component clusterComponent;
-
-	  //private ClusterInitBlock clusterInitBlock;
-
+	  /**
+	   * Repetition Vector.
+	   */
 	  private Map<AbstractVertex, Long> brv;
-
-	  protected Mapping mapping;
+	  /**
+	   * Store the splitted clusterable levels.
+	   */
 	  protected List<PiGraph> levelSCAPED = new ArrayList<>();
-	  
+	  /**
+	   * Store the non clusterable actor chosen manually by the operator.
+	   */
 	  private List<AbstractActor> nonClusterableList;
 
 	  private int clusterIndex = -1;//topological index
 	  private int clusterId = 0;// index cluster created
 
 	public Clustering(PiGraph graph, Scenario scenario, Design archi, Long stackSize, Long coreNumber,
-			boolean mode, int clusterNumber, int srdagMax, boolean parallelCluster, boolean optimizedCluster, boolean auto, List<AbstractActor> nonClusterableList) {
+			int mode, int levelNumber, List<AbstractActor> nonClusterableList) {
 	    this.graph = graph;
 	    this.scenario = scenario;
 	    this.archi = archi;
 	    this.stackSize = stackSize;
 	    this.coreNumber = coreNumber;
 	    this.mode = mode;
-	    this.clusterNumber = clusterNumber;
-	    this.srdagMax = srdagMax;
-	    this.parallelCluster = parallelCluster;
-	    this.optimizedCluster = optimizedCluster;
-	    this.auto = auto;
+	    this.levelNumber = levelNumber;
+	    this.srdagMax = 4000;
+	    this.parallelCluster = false;
 	    this.nonClusterableList = nonClusterableList;
-	    //this.clusterInitBlock = CodegenModelUserFactory.eINSTANCE.createClusterInitBlock();
 	}
 
 	public PiGraph execute() {
-	    /** 0. CLUSTER IDENTIFICATION **/
-
-
+	    
 	    int levelCount = 0;
-	   
-	    int patternLoop = 0;//several generation of urc srv
+	    //int patternLoop = 0;//several generation of urc srv
 	    String previousInitFunc ="";
-
 	    PiGraph upperLevel = graph;
 	    boolean isLastCluster = false;
 	    boolean fullRaiserMode = false;
@@ -142,99 +154,85 @@ public class Clustering {
 	    boolean grainOptim1 = false;
 	    boolean grainOptim2 = false;
 	    boolean grainEnable = true;
-	    boolean srcOptim = false;
-	    boolean optim = false;
-	    boolean wmemoOk = false;
+	    //boolean srcOptim = false;
 	    boolean isLOOP1;
+	    boolean isPipLoop;
 	    
-	for(PiGraph g : graph.getAllChildrenGraphs())
-		g.setClusterValue(true);
-	graph.setClusterValue(true);
-	    int totalLevelCount = computeLevel();//
+	    /** 0. LEVEL IDENTIFICATION **/
+		for(PiGraph g : graph.getAllChildrenGraphs())
+			g.setClusterValue(true);
+		graph.setClusterValue(true);
+	    int totalLevelCount = computeLevel();//compute the number of level of the input graph
+	    if(totalLevelCount <levelNumber) 
+	    	PreesmLogger.getLogger().log(Level.SEVERE, "the levelNumber: "+levelNumber+" to cluster should be less or equal to the total level of the input graph at least: "+totalLevelCount);
 	    int haSCAPEDCount = computehaSCAPED(totalLevelCount);
-
-	    //levelCount = computeCluster(graph);// if FH
 	    brv = PiBRV.compute(graph, BRVMethod.LCM);
+	    boolean pipProhibited = false;
 
-int test = 0;
 for(PiGraph haSCAPED : this.levelSCAPED){//loop on identified entry level
-	test++;
+	
 	//init bool
 	isLastCluster = false;
 	clusterID = false;
 	grainOptim1 = false;
 	grainOptim2 = false;
 	isLOOP1 = false;
+	isPipLoop = false;
 	levelCount  = haSCAPED.getAllChildrenGraphs().size()+1;
 	    for (int indexLevel = 1; indexLevel <= levelCount; indexLevel++) {
 	    	List<String[]> loopedBuffer = new ArrayList<>();
+	    	Long scale = 1L;
+	    	Map<AbstractVertex, Long> rv = new LinkedHashMap<>();
+		    Map<AbstractVertex, Long> rv2 = new LinkedHashMap<>();
 	    	clusterID = false;
 	    	grainOptim1 = false;
 	    	grainOptim2 = false;
+	    	isPipLoop = false;
+	    	
 	    	if(indexLevel==levelCount) {
 	    		isLastCluster = true;//prototype is different
-	    		if(mode)
+	    		if(coreNumber==1)//pas sure de ça
 	    			fullRaiserMode = true;
 	    	}
-
-	    	if(indexLevel==levelCount)
-	    		patternLoop++;
 	      /** 1.1 PATTERN IDENTIFICATION **/
-	    	Long scale = 1L;
-	    	Map<AbstractVertex, Long> rv = new LinkedHashMap<>();
-		      Map<AbstractVertex, Long> rv2 = new LinkedHashMap<>();
+	    	
 	      PiGraph lastLevel = computeBottomLevel(haSCAPED, totalLevelCount);//retrieve the bottom level
-
 	      upperLevel = graph;
 	      if (lastLevel.getContainingPiGraph() != null) {//if not top Graph
 	        upperLevel = lastLevel.getContainingPiGraph();
 	      }
-	      if(wmemoOk)
-	    	  isLOOP1 = new LOOP1Seeker(lastLevel).seek();// existing "for loop" check
-	      
-	      
-	      	      if(!isLOOP1) {
-	      	    	  int isLoopsize = lastLevel.getAllChildrenGraphs().size();
-	      	    	if(wmemoOk)
-	      	    		lastLevel = new ClusterPartitionerLOOP2(lastLevel, scenario).cluster();//LOOP2 transfo
-
-	      if(isLoopsize!= lastLevel.getAllChildrenGraphs().size()) {//added level
-	    	  isLOOP1=true;
-	    	  isLastCluster = false;
+	      if(mode==1 &&!lastLevel.equals(haSCAPED)) {
+	    	//create LOOP subgraphs 
+				int isAddedLevel=lastLevel.getAllChildrenGraphs().size();
+	    	  lastLevel = new ClusterPartitionerLOOP2(lastLevel, scenario).cluster();//LOOP2 transfo
+				brv = PiBRV.compute(graph, BRVMethod.LCM);
+				if(isAddedLevel!= lastLevel.getAllChildrenGraphs().size()) {//added level
+					clusterID=true;
+			    	  isLastCluster = false;
+			    	  pipProhibited = true;
+			    	  lastLevel = computeBottomLevel(haSCAPED, totalLevelCount);//retrieve the bottom level
+				      upperLevel = lastLevel.getContainingPiGraph();
+			      }
+				//Or let it be
 	      }
-	      lastLevel = computeBottomLevel(haSCAPED, totalLevelCount);//retrieve the bottom level
-	      upperLevel = lastLevel.getContainingPiGraph();
-	      if(!isLOOP1) {
-	      if(true) {//indexLevel==levelCount&&!mode||urcOptim
-	    	  // if all rate from the cluster > 1 then simple map optim
-		      int indexA = 0;
-//		      Long clustBRV[] = new Long [lastLevel.getExecutableActors().size()];
-//		      for(AbstractActor a : lastLevel.getExecutableActors()) {
-//
-//			    	  if(brv.containsKey(a)) {
-//			    		  if(lastLevel==graph)
-//			    			  clustBRV[indexA] = brv.get(a);
-//			    		  else
-//			    			  clustBRV[indexA] = brv.get(a)*brv.get(lastLevel);
-//			    		indexA ++;
-//			    	  }
-//		      }
-//		      scale = gcdJustAboveCoreNumber(clustBRV,clustBRV.length,lastLevel);
-	      // else then complex map optim
-		if(true){//scale ==1L&& !urcOptim
+
+//If SCAPE1 and curent level is the parameter level or if SCAPE2 then identification of particular patterns
+		if((mode==1 &&lastLevel.equals(haSCAPED)) ||mode==2){
 			brv = PiBRV.compute(graph, BRVMethod.LCM);//test
 			// Cluster input graph
 			int isurcsize = lastLevel.getAllChildrenGraphs().size();
+			
 			//create LOOP subgraph
-			if(!clusterID)
+			if(!clusterID &&!pipProhibited)
 				lastLevel = new ClusterPartitionerLOOP2(lastLevel, scenario).cluster();//LOOP2 transfo
 			brv = PiBRV.compute(graph, BRVMethod.LCM);
 			if(isurcsize!= lastLevel.getAllChildrenGraphs().size()) {//added level
 				clusterID=true;
 		    	  isLastCluster = false;
+		    	  isPipLoop = true;
+		    	  pipProhibited = true;
 		    	  
-		    	  
-		    	  //construct struct
+		    	  //construct struct memcpy(in_buffer, out_buffer, size)
 		    	  for(DataInputPort din : lastLevel.getChildrenGraphs().get(0).getDataInputPorts()) {
 		    		  if(din.getFifo().isHasADelay()) {
 		    			  String[] loop = {"","",""};
@@ -246,7 +244,15 @@ for(PiGraph haSCAPED : this.levelSCAPED){//loop on identified entry level
 		    	  }
 		    	  
 		      }
-			
+			//create sequential subgraphs of uniform time
+			if(!clusterID&&!pipProhibited)
+				lastLevel = new ClusterPartitionerSEQ(lastLevel, scenario, coreNumber.intValue(),brv,clusterId,nonClusterableList,archi).cluster();//SEQ transfo
+			brv = PiBRV.compute(graph, BRVMethod.LCM);
+			if(isurcsize!= lastLevel.getAllChildrenGraphs().size()) {//added level
+				clusterID=true;
+		    	  isLastCluster = false;
+		    	  pipProhibited = true;
+		      }
 			//create URC subgraph
 			lastLevel = new ClusterPartitioner(lastLevel, scenario, coreNumber.intValue(),brv,clusterId,nonClusterableList).cluster();//URC transfo
 			brv = PiBRV.compute(graph, BRVMethod.LCM);//test
@@ -262,109 +268,88 @@ for(PiGraph haSCAPED : this.levelSCAPED){//loop on identified entry level
 				clusterID=true;
 		    	  isLastCluster = false;
 		      }
-			
+			//create GRAIN1 subgraph
 			if(!clusterID&&!grainEnable)
 				lastLevel = new ClusterPartitionerGRAIN(lastLevel, scenario, coreNumber.intValue(),brv,clusterId,nonClusterableList).cluster();//GRAIN1 transfo
 			brv = PiBRV.compute(graph, BRVMethod.LCM);
 			if(isurcsize!= lastLevel.getAllChildrenGraphs().size()) {//added level
-				grainOptim1=true;
+				clusterID=true;
 		    	  isLastCluster = false;
 		      }
+			//create GRAIN2 subgraph
 			if(!clusterID&& !grainOptim1&&!grainEnable)
 				lastLevel = new ClusterPartitionerGRAIN(lastLevel, scenario, coreNumber.intValue(),brv,clusterId,nonClusterableList).cluster2();//GRAIN2 transfo
 			brv = PiBRV.compute(graph, BRVMethod.LCM);
 			if(isurcsize!= lastLevel.getAllChildrenGraphs().size()) {//added level
-				grainOptim2=true;
+				clusterID=true;
 		    	  isLastCluster = false;
 		      }
 
-		    if(clusterID||grainOptim1||grainOptim2) { // if adding level
-		    	 int addedLevel = lastLevel.getChildrenGraphs().size();
-		    	fullRaiserMode = false;
-		    	
-
-		    	//if(indexLevel>1)
-		    		addedLevel = addedLevel-1;
-		    	//levelCount = levelCount +addedLevel;//idk 1 si top, 0 sinon
-			    if(indexLevel==levelCount && fullRaiserMode )
-			    	isLastCluster = true;
-			    else
-			    	isLastCluster = false;
+		    if(clusterID) { // if adding level
 			    lastLevel = computeBottomLevel(haSCAPED, totalLevelCount);//retrieve the bottom level
-			    //lastLevel = computeLastLevel(brv,patternLoop);
 			    upperLevel = graph;
 			    if (lastLevel.getContainingPiGraph() != null) {//if not top Graph
 			      upperLevel = lastLevel.getContainingPiGraph();
 			    }
-			    indexA = 0;
+			    int indexA = 0;
 			    Long clustBRVurc[] = new Long [lastLevel.getExecutableActors().size()];
 			    for(AbstractActor a : lastLevel.getExecutableActors()) {
-			  	  //idk
-
 				    	  if(brv.containsKey(a)) {
 				    		  clustBRVurc[indexA] = brv.get(a)*brv.get(lastLevel);
 				    		indexA ++;
 				    	  }
 			    }
-
-			    scale = gcdJustAboveCoreNumber(clustBRVurc,clustBRVurc.length, lastLevel, upperLevel);
-
-			 optim = true;
+			    scale = gcdJustAboveCoreNumber(clustBRVurc,clustBRVurc.length, lastLevel, upperLevel, isPipLoop);
 		    }
-    	 }
-		}
-	      	      }
-	    }if(!clusterID && !isLOOP1 && !grainOptim1&&!grainOptim2) {
+    	 }//end pattern ID step
+		
+	    //If all pattern are identified on corresponding level permit to check upper or stop iteration
+	    if(!clusterID&&(mode==2||(mode==1&&lastLevel.equals(haSCAPED)))) {
 	    	lastLevel.setClusterValue(false);
-	    }else if(clusterID||isLOOP1|| grainOptim1||grainOptim2){
+	    }else {
 	    	clusterId++;
 	    	indexLevel--;
 	    }
 if(lastLevel.isClusterValue()) {
 	      	    brv = PiBRV.compute(graph, BRVMethod.LCM);
-	      	    
-	      	    
+
 	      	  /** 1.2 BRV SCALING to ARCHITECTURE **/
 	      	    
-	      if(scale>=coreNumber||clusterID||(isLOOP1) ){
-
+	      if(mode==2||(mode==1&&lastLevel.equals(haSCAPED))){
 	    	  for(DataInputInterface din:lastLevel.getDataInputInterfaces()) {
-	    		  if(!isLOOP1)
+	    		  if(!isLOOP1&& loopedBuffer.isEmpty())
 	    			  din.getGraphPort().setExpression(din.getGraphPort().getExpression().evaluate()*brv.get(lastLevel)/scale);//scale hierarchical actor rate
-	    			  if(isLOOP1 &&!din.getGraphPort().getFifo().isHasADelay())
+	    		  else if(!((String[]) loopedBuffer.get(0))[0].equals(din.getGraphPort().getName()))
+	    			  din.getGraphPort().setExpression(din.getGraphPort().getExpression().evaluate()*brv.get(lastLevel)/scale);//scale hierarchical actor rate
+	  	    	
+	    		  if(isLOOP1 &&!din.getGraphPort().getFifo().isHasADelay())
 	    				  din.getGraphPort().setExpression(din.getGraphPort().getExpression().evaluate()*brv.get(lastLevel));
-//	    			  if(din.getGraphPort().getFifo().getSource() instanceof SpecialActor)//adjust special actor rates
-//	    				  din.getGraphPort().getFifo().getSourcePort().setExpression(din.getGraphPort().getExpression().evaluate());
 	    			  din.getDataPort().setExpression(din.getGraphPort().getExpression().evaluate());
 	    	  }
-	      for(DataOutputInterface dout:lastLevel.getDataOutputInterfaces()) {
-	    	  if(!isLOOP1)
-	    	  dout.getGraphPort().setExpression(dout.getGraphPort().getExpression().evaluate()*brv.get(lastLevel)/scale);//scale hierarchical actor rate
-	    	  if(isLOOP1 &&!dout.getGraphPort().getFifo().isHasADelay())
-	    		  dout.getGraphPort().setExpression(dout.getGraphPort().getExpression().evaluate()*brv.get(lastLevel));
-	    	  if(dout.getGraphPort().getFifo().getTarget() instanceof SpecialActor)//adjust special actor rates
-				  dout.getGraphPort().getFifo().getTargetPort().setExpression(dout.getGraphPort().getExpression().evaluate());
-	    	  dout.getDataPort().setExpression(dout.getGraphPort().getExpression().evaluate());
-	      }
+		      for(DataOutputInterface dout:lastLevel.getDataOutputInterfaces()) {
+		    	  
+		    	  if(!isLOOP1&& loopedBuffer.isEmpty())
+		    	  dout.getGraphPort().setExpression(dout.getGraphPort().getExpression().evaluate()*brv.get(lastLevel)/scale);//scale hierarchical actor rate
+		    	  else if(!((String[]) loopedBuffer.get(0))[1].equals(dout.getGraphPort().getName()))
+		    		  dout.getGraphPort().setExpression(dout.getGraphPort().getExpression().evaluate()*brv.get(lastLevel)/scale);
+		    	  if(isLOOP1 &&!dout.getGraphPort().getFifo().isHasADelay())
+		    		  dout.getGraphPort().setExpression(dout.getGraphPort().getExpression().evaluate()*brv.get(lastLevel));
+		    	  if(dout.getGraphPort().getFifo().getTarget() instanceof SpecialActor)//adjust special actor rates
+					  dout.getGraphPort().getFifo().getTargetPort().setExpression(dout.getGraphPort().getExpression().evaluate());
+		    	  dout.getDataPort().setExpression(dout.getGraphPort().getExpression().evaluate());
+		      }
 	      brv = PiBRV.compute(graph, BRVMethod.LCM);//keep
-
 	      }
-
-	      //}
-
-	      if(!(!clusterID && clusterNumber==1&& !isLOOP1&&!grainOptim1&&!grainOptim2)){// si no urc added + param level = 1-> no cluster?
+	      if(mode==1||(!(!clusterID && !isLOOP1&&!grainOptim1&&!grainOptim2))){// si no urc added + param level = 1-> no cluster?
 	      for(AbstractActor a : lastLevel.getActors())
 	    	  if(brv.containsKey(a)) {
 	    		  rv.put(a, brv.get(a));
 	    		  rv2.put(a, brv.get(a));
-	    		  //brv.replace(a, brv.get(a));
 	    	  }
-
-
 
 	      /** 2. IBSDF TRANSFO **/
 	      if(!isLOOP1)
-	      checkIBSDF(lastLevel,rv, clusterID||grainOptim1||grainOptim2||srcOptim);
+	      checkIBSDF(lastLevel,rv, clusterID||grainOptim1||grainOptim2);
 	      PiGraph copiedCluster = PiMMUserFactory.instance.copy(lastLevel);
 	      copiedCluster.setClusterValue(true);//
 
@@ -373,7 +358,6 @@ if(lastLevel.isClusterValue()) {
 	      String schedulesMap = "";
 	      schedulesMap = registerClusterSchedule(lastLevel, rv);
 	      PreesmLogger.getLogger().log(Level.INFO, "cluster ("+lastLevel.getActorPath()+") :" + indexLevel +"/"+ levelCount + " schedule :" + schedulesMap);
-
 
 	      final String message = "cluster with " + rv2.size() + " actor and "
 	          + lastLevel.getAllFifos().size() + " fifo " + lastLevel.getAllParameters().size() + " parameter "
@@ -393,17 +377,13 @@ if(lastLevel.isClusterValue()) {
 	       // Retrieve the APOLLO flag
 	        final String apolloFlag = "false";
 	        final Collection<Block> codeBlocks = generator.generate(isLastCluster, brv,loopedBuffer);// 2
-
 	        for(Block b : codeBlocks) {
 	        	if(previousInitFunc!="")
 	        		((ClusterRaiserBlock) b).setInitFunc(previousInitFunc);
 	        	if(((ClusterRaiserBlock) b).getInitBuffers()!=null ||((ClusterRaiserBlock) b).getInitBlock()!=null) {
 	        		previousInitFunc = b.getName();
-
 	        	}
 	        }
-
-
 	        // Retrieve the desired printer and target folder path
 	        final String selectedPrinter = "C";
 	        final String clusterPath = scenario.getCodegenDirectory() + File.separator;
@@ -417,8 +397,6 @@ if(lastLevel.isClusterValue()) {
 	        engine.preprocessPrinters();
 	        engine.printClusterRaiser();// 3
 
-
-
 	        /** 6.1 LAST LEVEL REMOVE **/
 	        for(AbstractActor a : lastLevel.getOnlyActors()) {// actors + spe + Din/out
 	        	brv.remove(a);
@@ -427,10 +405,10 @@ if(lastLevel.isClusterValue()) {
 	        brv.remove(lastLevel);
 	        if(brv.size()==1)
 	        	value = (long) 1;
-	        remove(lastLevel,copiedCluster , upperLevel, isLastCluster, fullRaiserMode, value,isLOOP1);
-
+	        remove(lastLevel,copiedCluster , upperLevel, isLastCluster, fullRaiserMode, value,isLOOP1, isPipLoop);
 	        updateTiming(sumTiming,lastLevel);
 	        PreesmLogger.getLogger().log(Level.INFO, "cluster code generated : " + clusterPath);
+
 	      }
 	    }// end loop
 	}
@@ -443,15 +421,11 @@ if(lastLevel.isClusterValue()) {
 	    	int k = p.getOutgoingDependencies().size()-1;
 	    	for(int i = 0; i<p.getOutgoingDependencies().size();i++)
 	    		if(p.getOutgoingDependencies().get(k-i).eContainer()== null) {
-	    			//p.getOutgoingDependencies().remove(p.getOutgoingDependencies().get(k-i));
 	    			p.getOutgoingDependencies().get(k-i).setContainingGraph(g);
 	    		}
-
-
 	    }
 
-
-	    	List<PiGraph> listSub = new ArrayList<>();
+	    List<PiGraph> listSub = new ArrayList<>();
 	    listSub.add(graph);
 	    for(PiGraph g : graph.getAllChildrenGraphs())
 	    	listSub.add(g);
@@ -459,18 +433,34 @@ if(lastLevel.isClusterValue()) {
 	    	for(Dependency d : g.getDependencies())
 			   if( d.getGetter().eContainer() instanceof Delay)
 				   if(!(listSub.contains(d.getGetter().eContainer().eContainer()))) {
-					   //PiMMHelper.removeActorAndDependencies(g, ((Delay) d.getGetter().eContainer()).getActor());
 						   g.removeDependency(d);
 						   final ISetter setter = d.getSetter();
 						      setter.getOutgoingDependencies().remove(d);
 						      if (setter instanceof Parameter && setter.getOutgoingDependencies().isEmpty()
 						              && !((Parameter) setter).isConfigurationInterface()) {
-						            // graph.getVertices().remove((Parameter) setter);
 						            g.removeParameter((Parameter) setter);
 						          }
 				   }
 
-
+	    }
+	    int index = 0;
+	    for(AbstractActor a: graph.getAllExecutableActors()) {
+	    	if(a instanceof Actor)
+	    	if (a.getName().contains("loop"))
+	    		for(int i=0;i<a.getDataOutputPorts().size();i++)
+	    			if(a.getDataOutputPorts().get(i).getFifo().getTarget() instanceof Actor)
+	    			if(((AbstractActor) a.getDataOutputPorts().get(i).getFifo().getTarget()).getName().contains("loop")) {
+	    				
+	    				Delay d = PiMMUserFactory.instance.createDelay();
+	    				d.setName(a.getName()+".out-"+((AbstractActor) a.getDataOutputPorts().get(i).getFifo().getTarget()).getName()+".in_"+index);
+	    				d.setLevel(PersistenceLevel.PERMANENT);
+	    				d.setExpression(brv.get(a)*a.getDataOutputPorts().get(i).getExpression().evaluate());
+	    				d.setContainingGraph(a.getContainingGraph());
+	    				a.getDataOutputPorts().get(i).getFifo().assignDelay(d);
+	    				d.getActor().setContainingGraph(a.getContainingGraph());
+	    				index++;
+	    			}
+	    				
 	    }
 	    final String message1 = "final Graph with " + graph.getAllExecutableActors().size() + " actor and "
 	        + graph.getAllFifos().size() + " fifo " + graph.getAllParameters().size() + " parameter "
@@ -484,9 +474,7 @@ if(lastLevel.isClusterValue()) {
 
 	    final PiGraphConsistenceChecker pgcc = new PiGraphConsistenceChecker(CheckerErrorLevel.FATAL_ANALYSIS,
 	            CheckerErrorLevel.NONE);
-
 	        pgcc.check(graph);
-
 	    PiGraph graphCopy = PiMMUserFactory.instance.copyPiGraphWithHistory(graph);
 	    PiMMHelper.resolveAllParameters(graphCopy);
 	    Map<AbstractVertex, Long> repetitionVector = PiBRV.compute(graph, BRVMethod.LCM);//test to comment
@@ -496,7 +484,226 @@ if(lastLevel.isClusterValue()) {
 
 
 
+	  /**
+	   * Unrolled LOOP pattern on the gcd above number of Processing element pipelined cluster.
+	   * 
+	   * @param oEmpty
+	   *          loop element to be duplicate and pipelined
+	   * @param value
+	   *          highest divisor of brv(loop) just above the number of processing element
+	   */
+	private void PipLoopTransfo(AbstractActor oEmpty, Long value) {
+		List<AbstractActor> dupActorsList = new LinkedList<>();	
+		for(int i = 1;i< value;i++) {
+			AbstractActor dupActor = PiMMUserFactory.instance.copy(oEmpty);
+			dupActor.setName(oEmpty.getName()+"_"+i);
+			dupActor.setContainingGraph(oEmpty.getContainingGraph());
+			dupActorsList.add(dupActor);
+		}
+		for(DataInputPort in:oEmpty.getDataInputPorts()) {
+			if(!in.getFifo().isHasADelay()) {
+				ForkActor frk = PiMMUserFactory.instance.createForkActor();
+				frk.setName("Fork_"+oEmpty.getName());
+				frk.setContainingGraph(oEmpty.getContainingGraph());
+				
+				//connect din to frk
+				DataInputPort din = PiMMUserFactory.instance.createDataInputPort();
+				din.setName("in");
+				din.setExpression(in.getFifo().getSourcePort().getExpression().evaluate());
+				
+				frk.getDataInputPorts().add(din);
+				Fifo fin = PiMMUserFactory.instance.createFifo();
+				fin.setType(in.getFifo().getType());
+				fin.setSourcePort(in.getFifo().getSourcePort());
+				fin.setTargetPort(din);
+				
+				fin.setContainingGraph(oEmpty.getContainingGraph());
+				
+				//connect fork to oEmpty_0
+				DataOutputPort dout = PiMMUserFactory.instance.createDataOutputPort();
+				dout.setName("out_0");
+				dout.setExpression(in.getFifo().getTargetPort().getExpression().evaluate());
+				frk.getDataOutputPorts().add(dout);
+				Fifo fout = PiMMUserFactory.instance.createFifo();
+				fout.setType(in.getFifo().getType());
+				fout.setSourcePort(dout);
+				fout.setTargetPort(in);
+				fout.setContainingGraph(oEmpty.getContainingGraph());
+				// remove extra fifo --> non en fait c'est bon
+				
+				// connect fork to duplicated actors
+				for(int i = 1; i < value;i++) {
+					DataOutputPort doutn = PiMMUserFactory.instance.createDataOutputPort();
+					doutn.setName("out_"+i);
+					doutn.setExpression(in.getFifo().getTargetPort().getExpression().evaluate());
+					frk.getDataOutputPorts().add(doutn);
+					Fifo foutn = PiMMUserFactory.instance.createFifo();
+					foutn.setType(in.getFifo().getType());
+					foutn.setSourcePort(doutn);
+					foutn.setContainingGraph(oEmpty.getContainingGraph());
+				dupActorsList.get(i-1).getDataInputPorts().stream().filter(x->x.getName().equals(in.getName())).forEach(x -> x.setIncomingFifo(foutn));
+				
+				}
+			}else {
+				//if setter
+				if(in.getFifo().getDelay().hasSetterActor()) {
+					Fifo fd = PiMMUserFactory.instance.createFifo();
+					fd.setSourcePort(in.getFifo().getDelay().getSetterPort());
+					fd.setTargetPort(in);
+					fd.setContainingGraph(oEmpty.getContainingGraph());
+					
+				}else {
+					PreesmLogger.getLogger().log(Level.INFO, "unrolled loops requires setter and getter affected to a local delay");
+					Actor set = PiMMUserFactory.instance.createActor();
+					//InitActor set = PiMMUserFactory.instance.createInitActor();
+					set.setName("setter");
+					Refinement refinement = PiMMUserFactory.instance.createCHeaderRefinement();
 
+		            set.setRefinement(refinement);
+		            //((Actor) oEmpty).getRefinement().getFileName()
+		            // Set the refinement
+		            CHeaderRefinement cHeaderRefinement = (CHeaderRefinement) (((Actor) set).getRefinement());
+		            Prototype oEmptyPrototype = new Prototype();
+		            oEmptyPrototype.setIsStandardC(true);
+		            //String fileName = ;//lastLevel.getActorPath().replace("/", "_");
+		            cHeaderRefinement.setFilePath(((Actor) oEmpty).getRefinement().getFilePath());
+		            FunctionPrototype functionPrototype = PiMMUserFactory.instance.createFunctionPrototype();
+		            cHeaderRefinement.setLoopPrototype(functionPrototype);
+		            functionPrototype.setName(((Actor) oEmpty).getRefinement().getFileName());
+					
+					//set.setEndReference(oEmpty);
+					set.setContainingGraph(oEmpty.getContainingGraph());
+					DataOutputPort dout = PiMMUserFactory.instance.createDataOutputPort();
+					set.getDataOutputPorts().add(dout);
+					dout.setName("out");
+					dout.setExpression(in.getFifo().getDelay().getExpression().evaluate());
+					Fifo fd = PiMMUserFactory.instance.createFifo();
+					fd.setSourcePort(set.getDataOutputPorts().get(0));
+					fd.setTargetPort(in);
+					fd.setContainingGraph(oEmpty.getContainingGraph());
+				}
+			}
+		}
+	
+		for(DataOutputPort out:oEmpty.getDataOutputPorts()) {
+			if(!out.getFifo().isHasADelay()) {
+				JoinActor jn = PiMMUserFactory.instance.createJoinActor();
+				jn.setName("Join_"+oEmpty.getName());
+				jn.setContainingGraph(oEmpty.getContainingGraph());
+				
+				//connect Join to dout
+				DataOutputPort dout = PiMMUserFactory.instance.createDataOutputPort();
+				dout.setName("out");
+				dout.setExpression(out.getFifo().getTargetPort().getExpression().evaluate());
+				jn.getDataOutputPorts().add(dout);
+				Fifo fout = PiMMUserFactory.instance.createFifo();
+				fout.setSourcePort(dout);
+				fout.setTargetPort(out.getFifo().getTargetPort());
+				fout.setContainingGraph(oEmpty.getContainingGraph());
+				
+				//connect oEmpty_0 to Join
+				DataInputPort din = PiMMUserFactory.instance.createDataInputPort();
+				din.setName("in_0");
+				din.setExpression(out.getFifo().getSourcePort().getExpression().evaluate());
+				jn.getDataInputPorts().add(din);
+				Fifo fin = PiMMUserFactory.instance.createFifo();
+				fin.setSourcePort(out);
+				fin.setTargetPort(din);
+				fin.setContainingGraph(oEmpty.getContainingGraph());
+				// remove extra fifo --> non en fait c'est bon
+				
+				// connect duplicated actors to Join
+				for(int i = 1; i < value;i++) {
+					DataInputPort dinn = PiMMUserFactory.instance.createDataInputPort();
+					dinn.setName("in_"+i);
+					dinn.setExpression(out.getFifo().getSourcePort().getExpression().evaluate());
+					jn.getDataInputPorts().add(dinn);
+					Fifo finn = PiMMUserFactory.instance.createFifo();
+					finn.setTargetPort(dinn);
+					finn.setContainingGraph(oEmpty.getContainingGraph());
+				dupActorsList.get(i-1).getDataOutputPorts().stream().filter(x->x.getName().equals(out.getName())).forEach(x -> x.setOutgoingFifo(finn));
+				
+				}
+			}
+		else {
+			
+			
+		
+			
+			//if getter
+			// connect last one to getter
+			//Fifo fd = PiMMUserFactory.instance.createFifo();
+			
+			if(out.getFifo().getDelay().hasGetterActor()) {
+				Fifo fdout = PiMMUserFactory.instance.createFifo();
+				dupActorsList.get((int) (value-2)).getDataOutputPorts().stream().filter(x->x.getFifo()==null).forEach(x -> x.setOutgoingFifo(fdout));
+				fdout.setTargetPort(out.getFifo().getDelay().getGetterPort());
+				fdout.setContainingGraph(oEmpty.getContainingGraph());
+				
+			}else {
+				PreesmLogger.getLogger().log(Level.INFO, "unrolled loops requires setter and getter affected to a local delay");
+				//EndActor get = PiMMUserFactory.instance.createEndActor();
+				Actor get = PiMMUserFactory.instance.createActor();
+				get.setName("getter");
+				///******
+				Refinement refinement = PiMMUserFactory.instance.createCHeaderRefinement();
+
+	            get.setRefinement(refinement);
+	            //((Actor) oEmpty).getRefinement().getFileName()
+	            // Set the refinement
+	            CHeaderRefinement cHeaderRefinement = (CHeaderRefinement) (((Actor) get).getRefinement());
+	            Prototype oEmptyPrototype = new Prototype();
+	            oEmptyPrototype.setIsStandardC(true);
+	            //String fileName = ;//lastLevel.getActorPath().replace("/", "_");
+	            cHeaderRefinement.setFilePath(((Actor) oEmpty).getRefinement().getFilePath());
+	            FunctionPrototype functionPrototype = PiMMUserFactory.instance.createFunctionPrototype();
+	            cHeaderRefinement.setLoopPrototype(functionPrototype);
+	            functionPrototype.setName(((Actor) oEmpty).getRefinement().getFileName());/**/
+				//get.setInitReference(dupActorsList.get((int) (value-2)));
+	            
+				get.setContainingGraph(oEmpty.getContainingGraph());
+				DataInputPort din = PiMMUserFactory.instance.createDataInputPort();
+				get.getDataInputPorts().add(din);
+				din.setName("in");
+				din.setExpression(out.getFifo().getDelay().getExpression().evaluate());
+				Fifo fdout = PiMMUserFactory.instance.createFifo();
+				dupActorsList.get((int) (value-2)).getDataOutputPorts().stream().filter(x->x.getFifo()==null).forEach(x -> x.setOutgoingFifo(fdout));
+				fdout.setTargetPort(get.getDataInputPorts().get(0));
+				fdout.setContainingGraph(oEmpty.getContainingGraph());
+			}
+			//connect oEmpty delayed output to 1st duplicated actor
+			Fifo fdin = PiMMUserFactory.instance.createFifo();
+			fdin.setSourcePort(out);
+			dupActorsList.get(0).getDataInputPorts().stream().filter(x->x.getFifo()==null).forEach(x -> x.setIncomingFifo(fdin));
+			fdin.setContainingGraph(oEmpty.getContainingGraph());
+			
+			
+		}
+		}
+		// interconnect duplicated actor on their delayed port
+		for(int i = 0;i<value-2;i++) {
+		Fifo fd = PiMMUserFactory.instance.createFifo();
+		dupActorsList.get(i).getDataOutputPorts().stream().filter(x->x.getFifo()==null).forEach(x -> x.setOutgoingFifo(fd));
+		dupActorsList.get(i+1).getDataInputPorts().stream().filter(x->x.getFifo()==null).forEach(x -> x.setIncomingFifo(fd));
+		fd.setContainingGraph(oEmpty.getContainingGraph());
+		}
+		//remove delay
+		((PiGraph)oEmpty.getContainingGraph()).getDelays().stream().filter(x->x.getContainingFifo().getSourcePort()==null).forEach(x->((PiGraph)oEmpty.getContainingGraph()).removeDelay(x));
+		//remove empty fifo
+		((PiGraph)oEmpty.getContainingGraph()).getFifos().stream().filter(x->x.getSourcePort()==null).forEach(x->((PiGraph)oEmpty.getContainingGraph()).removeFifo(x));
+		((PiGraph)oEmpty.getContainingGraph()).getFifos().stream().filter(x->x.getTargetPort()==null).forEach(x->((PiGraph)oEmpty.getContainingGraph()).removeFifo(x));
+		
+		int j=0;
+	}
+	/**
+	   * Unrolled LOOP pattern on the gcd above number of Processing element pipelined cluster.
+	   * 
+	   * @param oEmpty
+	   *          loop element to be duplicate and pipelined
+	   * @param value
+	   *          highest divisor of brv(loop) just above the number of processing element
+	   *          @return bottomLevel
+	   */
 	private PiGraph computeBottomLevel(PiGraph haSCAPE, int totalLevelCount) {
 		PiGraph bottomLevel = null;
 		int countMax = 0;
@@ -522,24 +729,38 @@ if(lastLevel.isClusterValue()) {
 
 		return bottomLevel;
 	}
-
+	/**
+	   * Compute level to be clustered
+	   * 
+	   * @param totalLevelCount
+	   *          number of level in the input graph
+	   * @return count
+	   *          the number of subgraphs located at the level entered in the clustering task parameter
+	   */
 	private int computehaSCAPED(int totalLevelCount) {
 	    int count = 0;
 	    int levelCountTemp = 1;
+	    int LastClusterLevelID=1;
+	    if(mode==1){//IF SCAPE1 only level below the  level entered in input parameter are clustered
+	    	LastClusterLevelID = this.levelNumber;
 
 	    for(AbstractActor a : graph.getAllActors()) {
 	    	PiGraph g = a.getContainingPiGraph();
 	    	levelCountTemp = 1;
-	    while(g.getContainingPiGraph()!=null) {
-	    	g = g.getContainingPiGraph();
-	    	levelCountTemp++;
+		    while(g.getContainingPiGraph()!=null) {
+		    	g = g.getContainingPiGraph();
+		    	levelCountTemp++;
+		    }
+		    
+		    if(levelCountTemp == totalLevelCount-LastClusterLevelID+1&& !levelSCAPED.contains(a.getContainingGraph())) {
+		    	count ++;
+		    	this.levelSCAPED.add(a.getContainingPiGraph());
+		    }
+	    }}
+	    else {//If SCAPE2 each level of the input graph are clustered
+	    	count++;
+	    	this.levelSCAPED.add(graph);
 	    }
-	    if(levelCountTemp == totalLevelCount-clusterNumber+1&& !levelSCAPED.contains(a.getContainingGraph())) {
-	    	count ++;
-	    	this.levelSCAPED.add(a.getContainingPiGraph());
-
-	    }
-	    	}
 	    return count;
 	}
 
@@ -609,7 +830,7 @@ if(lastLevel.isClusterValue()) {
 	   * @param levelCount
 	   *          number f hierarchical actor that can result in cluster
 	   */
-	private void computeClusterNumber(Map<AbstractVertex, Long> brv2, int levelCount) {
+	/*private void computeClusterNumber(Map<AbstractVertex, Long> brv2, int levelCount) {
 
 		Map<AbstractVertex, Long> fullBrv = brv2;
 		Long fullSrDAG = (long) 0;
@@ -632,9 +853,7 @@ if(lastLevel.isClusterValue()) {
 		maxVertex.getContainingPiGraph();
 
 		PreesmLogger.getLogger().log(Level.INFO, "sum brv 0 : "+fullSrDAG);
-		if(optimizedCluster) {
-			PreesmLogger.getLogger().log(Level.INFO, "wait, optimizedCluster is not yet implemented");
-		}else {
+		
 			for(int i = 1; i<levelCount; i++) {
 				for(Entry<AbstractVertex, Long> entry :fullBrv.entrySet()) {
 					fullSrDAG = fullSrDAG + entry.getValue();
@@ -653,7 +872,7 @@ if(lastLevel.isClusterValue()) {
 				if(fullSrDAG < srdagMax )
 					nbClusterToBrv.put((long) i, partSrDAG);
 			}
-		}
+		
 		// retrieve best k
 		float k = 1;
 		int bestNbCluster = 0;
@@ -666,7 +885,7 @@ if(lastLevel.isClusterValue()) {
 		}
 		clusterNumber = bestNbCluster;
 
-	}
+	}*/
 	  /**
 	   * Used to store timing inside the cluster
 	   *
@@ -680,7 +899,7 @@ if(lastLevel.isClusterValue()) {
         AbstractActor aaa = null;
         if (sumTiming != null) {
           for (AbstractActor aa : graph.getAllActors()) {
-            if (lastLevel.getName().equals(aa.getName())) {
+            if (lastLevel.getName().equals(aa.getName())||aa.getName().contains(lastLevel.getName())) {
               aaa = aa;
               // update timing
               scenario.getTimings().setTiming(aaa, clusterComponent, TimingType.EXECUTION_TIME,
@@ -715,7 +934,7 @@ if(lastLevel.isClusterValue()) {
 	   *          PiGraph of the cluster
 	 * @param isLOOP1 
 	   */
-	private void remove(PiGraph lastLevel, PiGraph copiedCluster, PiGraph upperLevel, boolean isLastCluster, boolean fullRaiserMode, Long value, boolean isLOOP1) {
+	private void remove(PiGraph lastLevel, PiGraph copiedCluster, PiGraph upperLevel, boolean isLastCluster, boolean fullRaiserMode, Long value, boolean isLOOP1, boolean isPipLoop) {
 		final String clusterPath = scenario.getCodegenDirectory() + File.separator;
 		AbstractActor oEmpty = PiMMUserFactory.instance.createActor();
 
@@ -1024,6 +1243,10 @@ if(lastLevel.isClusterValue()) {
 
         }
         brv.put(oEmpty, value);
+      //duplicate instance if loop
+		 if(isPipLoop) {
+			 PipLoopTransfo(oEmpty, value);
+		 }
 
 	}
 	  /**
@@ -1553,12 +1776,13 @@ if(lastLevel.isClusterValue()) {
 	}
 	// Function to find gcd of array of
 	// numbers
-	  private  Long gcdJustAboveCoreNumber(Long arr[], int length, PiGraph lastLevel, PiGraph upperLevel)
+	  private  Long gcdJustAboveCoreNumber(Long arr[], int length, PiGraph lastLevel, PiGraph upperLevel, Boolean isPipLoop)
 	{
 		  boolean d = false;
 		  Long dValue = 0L;
 		  Long rate = 0L;
 		  long ratio = 0L;
+		  if(!isPipLoop) {
 		  for(DataInputInterface din : lastLevel.getDataInputInterfaces())
 			  if(din.getGraphPort().getFifo().getSource() instanceof DataInputInterface) {
 				 if(((DataInputInterface) din.getGraphPort().getFifo().getSource()).getGraphPort().getFifo().isHasADelay()) {
@@ -1633,7 +1857,7 @@ if(lastLevel.isClusterValue()) {
 					  }
 				  }
 			   }
-
+	}
 		  ArrayList<Long> initBRVdivisor = divisor(arr[0]) ;
 		  ArrayList<Long>finalBRVdivisor = new ArrayList<>();
 	  for (int i = 1; i < length; i++) {
@@ -1933,9 +2157,6 @@ if(lastLevel.isClusterValue()) {
 	  }
 	  /**
 	   * Used to compute the number of level in the graph
-	   *
-	   * @param graph2
-	   *          graph
 	   */
 	  private int computeLevel() {
 	    //EList<AbstractActor> amount = graph.getAllActors();// all actor all level
@@ -1951,53 +2172,10 @@ if(lastLevel.isClusterValue()) {
 	    }
 	    levelCount = Math.max(levelCount, levelCountTemp);
 	    }
-
-
-
-
-
 	    return levelCount;
 	  }
-	  /**
-	   * Used to compute the sum of possible cluster
-	   *
-	   * @param graph2
-	   *          graph
-	   */
-	  private int computeCluster(PiGraph graph2) {
-	    //EList<AbstractActor> amount = graph.getAllActors();// all actor all level
-	    int levelCount = graph.getAllChildrenGraphs().size()+1; // sum (hierarchical actors) + top
-	    return levelCount;
-	  }
-	  /**
-	   * Add a BroadcastActor in the place of a DataInputInterface
-	   *
-	   * @param sourceActor
-	   *          the source interface
-	   * @return the BroadcastActor
-	   */
-	  private BroadcastActor addBroadCastIn(final AbstractActor sourceActor, PiGraph lastLevel) {
-	    final BroadcastActor interfaceBR = PiMMUserFactory.instance.createBroadcastActor();
-	    interfaceBR.setName("BR_" + lastLevel.getActorPath() + "_" + sourceActor.getName());
-	    // Add the BroadcastActor to the graph
-	    lastLevel.addActor(interfaceBR);
-	    return interfaceBR;
-	  }
 
-	  /**
-	   * Add a RoundBufferActor in the place of a DataOutputInterface
-	   *
-	   * @param sinkActor
-	   *          the sink interface
-	   * @return the RoundBufferActor
-	   */
-	  private RoundBufferActor addRoundBufferOut(final AbstractActor sinkActor, PiGraph lastLevel) {
-	    final RoundBufferActor interfaceRB = PiMMUserFactory.instance.createRoundBufferActor();
-	    interfaceRB.setName("RB_" + lastLevel.getActorPath() + "_" + sinkActor.getName());
-	    // Add the RoundBufferActor to the graph
-	    lastLevel.addActor(interfaceRB);
-	    return interfaceRB;
-	  }
+
 	  /**
 	   * Compute the scale factor to apply to RV values based on DataOutputInterfaces. It also checks the input interfaces
 	   * properties.
